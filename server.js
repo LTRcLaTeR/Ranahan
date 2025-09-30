@@ -7,12 +7,17 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;  // ✅ ใช้ env.port สำหรับ render
 
 // Middleware
-app.use(cors());            
+app.use(cors());
 app.use(express.json());
-app.use(express.static("."));
+app.use(express.static(path.join(__dirname, "public"))); // ✅ เสิร์ฟไฟล์จาก public/
+
+// Root route (แสดง index.html)
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
 // ===== Database =====
 const DB_FILE = path.join(__dirname, "ranahan.db");
@@ -21,7 +26,7 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
   else console.log("✅ Connected to SQLite");
 });
 
-// ===== Create tables if not exist =====
+// ===== Table definitions =====
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,7 +76,6 @@ db.serialize(() => {
     shiftTime TEXT
   )`);
 
-  // ✅ tables สำหรับสถานะโต๊ะ
   db.run(`CREATE TABLE IF NOT EXISTS tables (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     table_number TEXT UNIQUE,
@@ -79,23 +83,22 @@ db.serialize(() => {
     status TEXT NOT NULL DEFAULT 'Available'
   )`);
 
-  // ✅ bookings (ต้องเป็น INTEGER เหมือน seed.sql)
   db.run(`CREATE TABLE IF NOT EXISTS bookings (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL,
-  table_id INTEGER NOT NULL,
-  date TEXT NOT NULL,
-  time TEXT NOT NULL,
-  people INTEGER NOT NULL,
-  comment TEXT,
-  createdAt TEXT DEFAULT CURRENT_TIMESTAMP
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    table_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    time TEXT NOT NULL,
+    people INTEGER NOT NULL,
+    comment TEXT,
+    createdAt TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
 
-    // ORDERS (normalized)
   db.run(`CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     table_no TEXT,
     total REAL,
+    status TEXT DEFAULT 'Pending',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
 
@@ -109,59 +112,57 @@ db.serialize(() => {
     FOREIGN KEY(order_id) REFERENCES orders(id)
   )`);
 
+  db.run(`CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER,
+    table_no TEXT,
+    items TEXT,
+    subtotal REAL,
+    vat REAL,
+    total REAL,
+    method TEXT,
+    paid_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
 });
 
-// ===== Auto-seed จาก seed.sql เมื่อว่าง =====
+// ===== Seeding functions (menu, stock) =====
 function autoSeedIfEmpty() {
   return new Promise((resolve) => {
     db.get("SELECT COUNT(*) AS c FROM menu", (err, row) => {
-      if (err) { console.error("COUNT menu error:", err); return resolve(); }
-      if (row && row.c > 0) return resolve(); // มีเมนูแล้ว ข้าม
-
-      // ไม่มีเมนู → อ่าน seed.sql แล้ว exec
+      if (err) return resolve();
+      if (row && row.c > 0) return resolve();
       try {
         const sql = fs.readFileSync(path.join(__dirname, "seed.sql"), "utf8");
         db.exec(sql, (e) => {
-          if (e) console.error("Seeding error (seed.sql):", e);
-          else console.log("🌱 Seeded from seed.sql");
+          if (!e) console.log("🌱 Seeded from seed.sql");
           resolve();
         });
-      } catch (readErr) {
-        console.error("Read seed.sql error:", readErr);
+      } catch {
         resolve();
       }
     });
   });
 }
 
-// ===== Seed สต็อกตัวอย่างถ้าว่าง =====
 function seedStockIfEmpty() {
   db.get("SELECT COUNT(*) AS c FROM stock", (err, row) => {
-    if (err) return console.error("COUNT stock error:", err);
-    if (row && row.c > 0) return console.log("ℹ️ Stock already has data");
+    if (err) return;
+    if (row && row.c > 0) return;
     console.log("🌱 Seeding sample stock...");
     const stmt = db.prepare(
       "INSERT INTO stock (orderId, product, amount, salesChannel, remaining, status) VALUES (?,?,?,?,?,?)"
     );
     [
-      ["OD-1001", "Beef",       "5 kg",  "Dine-in",  85, "High"],
-      ["OD-1002", "Pork",       "3 kg",  "Delivery", 60, "High"],
-      ["OD-1003", "Chicken",    "2 kg",  "Takeaway", 18, "Low"],
-      ["OD-1004", "Thai Chili", "1 kg",  "Dine-in",  12, "Low"],
-      ["OD-1005", "Rice",       "20 kg", "Delivery", 75, "High"],
+      ["OD-1001", "Beef", "5 kg", "Dine-in", 85, "High"],
+      ["OD-1002", "Pork", "3 kg", "Delivery", 60, "High"],
+      ["OD-1003", "Chicken", "2 kg", "Takeaway", 18, "Low"],
+      ["OD-1004", "Thai Chili", "1 kg", "Dine-in", 12, "Low"],
+      ["OD-1005", "Rice", "20 kg", "Delivery", 75, "High"],
     ].forEach(r => stmt.run(r));
     stmt.finalize(() => console.log("✅ Seeded sample stock"));
   });
 }
-
-// เรียก seed ตอนเริ่ม
-// เรียกตอนสตาร์ท
-autoSeedIfEmpty().then(() => {
-  // เรียก seed stock ต่อได้เลย (กันกรณี seed.sql ไม่มีตัวอย่าง stock)
-  seedStockIfEmpty();
-});
-
-app.use((req,res,next)=>{ console.log(req.method, req.url); next(); });
+autoSeedIfEmpty().then(seedStockIfEmpty);
 
 // ===== API: Users =====
 app.post("/api/register", (req, res) => {
@@ -826,7 +827,11 @@ app.delete("/api/bookings/:id", (req, res) => {
     });
   });
 });
+// ===== ใส่ API ทั้งหมด (Users, Menu, Promotions, Stock, Tables, Orders, Payments, Bookings) =====
+// 🔹 ผมไม่ลบ API เดิมของคุณ แต่แนะนำเก็บไว้ไฟล์แยก เช่น routes/users.js, routes/orders.js เพื่อให้อ่านง่าย
+
 // ===== Start server =====
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
+
