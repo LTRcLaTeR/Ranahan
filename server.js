@@ -7,7 +7,7 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
-const PORT = process.env.PORT || 3000;  // ✅ ใช้ env.port สำหรับ render
+const PORT = process.env.PORT || 10000;  // ✅ ใช้ env.port สำหรับ render
 
 // Middleware
 app.use(cors());
